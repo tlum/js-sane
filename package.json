@@ -1,0 +1,35 @@
+{
+  "name": "js-sane",
+  "version": "0.1.0",
+  "description": "Node.js addon scaffold for the Linux SANE API",
+  "license": "MIT",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "gypfile": true,
+  "files": [
+    "binding.gyp",
+    "dist",
+    "src/native"
+  ],
+  "scripts": {
+    "install": "node -e \"console.log('Skipping native build during npm install. Run npm run build:addon after installing libsane development headers.')\"",
+    "build": "npm run build:addon && npm run build:ts",
+    "prebuild:addon": "node tools/check-libsane.js",
+    "build:addon": "node-gyp rebuild",
+    "build:ts": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build:ts && node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "node-addon-api": "^8.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "node-gyp": "^11.2.0",
+    "typescript": "^5.8.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
