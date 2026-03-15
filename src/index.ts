@@ -90,38 +90,6 @@ export interface SaneReadResult {
   data: Buffer;
 }
 
-export type SaneDeviceState = "unknown" | "idle" | "ready" | "warming-up" | "attention";
-
-export interface SaneStatusSummary {
-  deviceName: string;
-  state: SaneDeviceState;
-  ready: boolean;
-  attention: boolean;
-  raw: SaneStatusSnapshot;
-}
-
-export interface SaneScannerPollSnapshot {
-  status: SaneStatusSnapshot;
-  summary: SaneStatusSummary;
-  ready: boolean;
-  shouldStart: boolean;
-}
-
-export interface SaneScannerWaitOptions {
-  signal?: AbortSignal;
-  timeoutMs?: number;
-}
-
-export interface SaneScannerOptions {
-  pollIntervalMs?: number;
-  isReady?: (device: SaneDeviceConnection, status: SaneStatusSnapshot) => boolean;
-  shouldStart?: (
-    device: SaneDeviceConnection,
-    status: SaneStatusSnapshot,
-    ready: boolean,
-  ) => boolean;
-}
-
 interface NativeDeviceHandle {
   name: string;
   close(): void;
@@ -207,251 +175,12 @@ export class SaneDeviceConnection {
   }
 }
 
-export function summarizeStatus(status: SaneStatusSnapshot): SaneStatusSummary {
-  if (status.coverOpen === true) {
-    return {
-      deviceName: status.deviceName,
-      state: "attention",
-      ready: false,
-      attention: true,
-      raw: status,
-    };
-  }
-
-  if (status.warmup === true) {
-    return {
-      deviceName: status.deviceName,
-      state: "warming-up",
-      ready: false,
-      attention: false,
-      raw: status,
-    };
-  }
-
-  if (status.pageLoaded === true) {
-    return {
-      deviceName: status.deviceName,
-      state: "ready",
-      ready: true,
-      attention: false,
-      raw: status,
-    };
-  }
-
-  const hasKnownSignals =
-    status.coverOpen !== undefined || status.warmup !== undefined || status.pageLoaded !== undefined;
-
-  return {
-    deviceName: status.deviceName,
-    state: hasKnownSignals ? "idle" : "unknown",
-    ready: false,
-    attention: false,
-    raw: status,
-  };
-}
-
-export class SaneScanSession {
-  private completed = false;
-  private cancelled = false;
-
-  constructor(
-    private readonly device: SaneDeviceConnection,
-    readonly parameters: SaneParameters,
-  ) {}
-
-  readChunk(maxLength = 32768): SaneReadResult {
-    const chunk = this.device.read(maxLength);
-    if (chunk.eof) {
-      this.completed = true;
-    }
-    return chunk;
-  }
-
-  *readChunks(maxLength = 32768): Iterable<SaneReadResult> {
-    for (;;) {
-      const chunk = this.readChunk(maxLength);
-      yield chunk;
-      if (chunk.eof) {
-        break;
-      }
-    }
-  }
-
-  readAll(maxLength = 32768): Buffer {
-    const chunks: Buffer[] = [];
-    for (const chunk of this.readChunks(maxLength)) {
-      if (chunk.bytesRead > 0) {
-        chunks.push(chunk.data);
-      }
-    }
-    return Buffer.concat(chunks);
-  }
-
-  cancel(): void {
-    if (this.cancelled || this.completed) {
-      return;
-    }
-    this.device.cancel();
-    this.cancelled = true;
-  }
-
-  close(): void {
-    this.cancel();
-  }
-}
-
-export class SaneScanner {
-  private readonly pollIntervalMs: number;
-  private readonly isReadyFn: (device: SaneDeviceConnection, status: SaneStatusSnapshot) => boolean;
-  private readonly shouldStartFn: (
-    device: SaneDeviceConnection,
-    status: SaneStatusSnapshot,
-    ready: boolean,
-  ) => boolean;
-
-  constructor(
-    private readonly device: SaneDeviceConnection,
-    options: SaneScannerOptions = {},
-  ) {
-    this.pollIntervalMs = options.pollIntervalMs ?? 250;
-    this.isReadyFn = options.isReady ?? defaultIsReady;
-    this.shouldStartFn = options.shouldStart ?? ((_, __, ready) => ready);
-  }
-
-  get name(): string {
-    return this.device.name;
-  }
-
-  close(): void {
-    this.device.close();
-  }
-
-  getOptionDescriptors(): SaneOptionDescriptor[] {
-    return this.device.getOptionDescriptors();
-  }
-
-  getOptionValue(key: number | string): SaneOptionValue {
-    return this.device.getOptionValue(key);
-  }
-
-  setOptionValue(key: number | string, value: SaneOptionValue): SaneControlResult {
-    return this.device.setOptionValue(key, value);
-  }
-
-  setOptionAuto(key: number | string): SaneControlResult {
-    return this.device.setOptionAuto(key);
-  }
-
-  triggerOption(key: number | string): SaneControlResult {
-    return this.device.triggerOption(key);
-  }
-
-  getStatus(): SaneStatusSnapshot {
-    return this.device.getStatus();
-  }
-
-  getStatusSummary(): SaneStatusSummary {
-    return summarizeStatus(this.getStatus());
-  }
-
-  pollOnce(): SaneScannerPollSnapshot {
-    const status = this.getStatus();
-    const summary = summarizeStatus(status);
-    const ready = this.isReadyFn(this.device, status);
-    const shouldStart = this.shouldStartFn(this.device, status, ready);
-
-    return {
-      status,
-      summary,
-      ready,
-      shouldStart,
-    };
-  }
-
-  async waitForStart(options: SaneScannerWaitOptions = {}): Promise<SaneScannerPollSnapshot> {
-    const deadline =
-      options.timeoutMs === undefined ? undefined : Date.now() + options.timeoutMs;
-
-    for (;;) {
-      if (options.signal?.aborted) {
-        throw new Error("waitForStart aborted");
-      }
-
-      const snapshot = this.pollOnce();
-      if (snapshot.shouldStart) {
-        return snapshot;
-      }
-
-      if (deadline !== undefined && Date.now() >= deadline) {
-        throw new Error("waitForStart timed out");
-      }
-
-      await sleep(this.pollIntervalMs, options.signal);
-    }
-  }
-
-  getParameters(): SaneParameters {
-    return this.device.getParameters();
-  }
-
-  setIoMode(nonBlocking: boolean): void {
-    this.device.setIoMode(nonBlocking);
-  }
-
-  getSelectFd(): number | null {
-    return this.device.getSelectFd();
-  }
-
-  startSession(): SaneScanSession {
-    return new SaneScanSession(this.device, this.device.start());
-  }
-
-  withSession<T>(fn: (session: SaneScanSession) => T): T {
-    const session = this.startSession();
-    try {
-      return fn(session);
-    } finally {
-      session.close();
-    }
-  }
-}
-
 export interface SaneApi {
   init(): SaneVersion;
   exit(): void;
   getVersion(): SaneVersion;
   listDevices(localOnly?: boolean): SaneDevice[];
   openDevice(name: string): SaneDeviceConnection;
-  openScanner(name: string, options?: SaneScannerOptions): SaneScanner;
-}
-
-function defaultIsReady(_: SaneDeviceConnection, status: SaneStatusSnapshot): boolean {
-  return status.coverOpen !== true && status.warmup !== true && status.pageLoaded === true;
-}
-
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  if (ms <= 0) {
-    return Promise.resolve();
-  }
-
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      cleanup();
-      resolve();
-    }, ms);
-
-    const onAbort = () => {
-      cleanup();
-      reject(new Error("waitForStart aborted"));
-    };
-
-    const cleanup = () => {
-      clearTimeout(timeout);
-      signal?.removeEventListener("abort", onAbort);
-    };
-
-    signal?.addEventListener("abort", onAbort, { once: true });
-  });
 }
 
 export function createApi(native: NativeAddon): SaneApi {
@@ -470,9 +199,6 @@ export function createApi(native: NativeAddon): SaneApi {
     },
     openDevice(name: string): SaneDeviceConnection {
       return new SaneDeviceConnection(native.openDevice(name));
-    },
-    openScanner(name: string, options?: SaneScannerOptions): SaneScanner {
-      return new SaneScanner(new SaneDeviceConnection(native.openDevice(name)), options);
     },
   };
 }
@@ -504,6 +230,6 @@ export function openDevice(name: string): SaneDeviceConnection {
   return getDefaultApi().openDevice(name);
 }
 
-export function openScanner(name: string, options?: SaneScannerOptions): SaneScanner {
-  return getDefaultApi().openScanner(name, options);
+export function openScanner(name: string): SaneDeviceConnection {
+  return openDevice(name);
 }

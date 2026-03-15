@@ -1,6 +1,6 @@
 # js-sane
 
-Initial scaffold for a Node.js addon that links against Linux `libsane`.
+Node.js addon scaffold that binds to Linux `libsane`.
 
 ## Prerequisites
 
@@ -27,55 +27,36 @@ The native addon links with `-lsane`, so the system linker must be able to find 
 ## Current API
 
 ```ts
-import { init, exit, listDevices, openScanner } from "js-sane";
+import { init, exit, listDevices, openDevice } from "js-sane";
 
 init();
 const devices = listDevices(true);
-const scanner = openScanner(devices[0].name);
+const device = openDevice(devices[0].name);
 
-const poll = await scanner.waitForStart();
-console.log(poll);
+const status = device.getStatus();
+device.setOptionValue("resolution", 300);
+const parameters = device.start();
+const chunk = device.read(32768);
 
-scanner.setOptionValue("resolution", 300);
+console.log(status, parameters, chunk.bytesRead);
 
-scanner.withSession((scan) => {
-  console.log(scan.parameters);
-  const image = scan.readAll(32768);
-  console.log(image.length);
-});
-
-scanner.close();
+device.cancel();
+device.close();
 exit();
 ```
 
 `listDevices(true)` limits discovery to local devices. `false` allows backends that expose remote devices.
 
-The addon now exposes:
+The addon exposes one-shot binding primitives:
 
 - `init()` and `exit()` for explicit SANE library lifecycle control.
 - `getVersion()` for the negotiated SANE version.
 - `listDevices(localOnly?)` for backend device discovery.
-- `openScanner(name, options?)` for polling and session orchestration.
 - `openDevice(name)` returning a device handle with:
   `close()`, `getOptionDescriptors()`, `getOptionValue(key)`, `setOptionValue(key, value)`, `setOptionAuto(key)`, `triggerOption(key)`, `getStatus()`, `getParameters()`, `start()`, `read(maxLength?)`, `cancel()`, `setIoMode(nonBlocking)`, and `getSelectFd()`.
+- `openScanner(name)` as a thin alias for `openDevice(name)` if that naming fits the caller better.
 
-`openScanner(name, options?)` wraps a device connection with:
-
-- `pollOnce()` for a single readiness/start snapshot
-- `waitForStart()` for polling until batch-start conditions are met
-- `getStatusSummary()` for normalized states like `ready`, `warming-up`, `attention`, and `idle`
-- `startSession()` for explicit frame reading via a `SaneScanSession`
-- `withSession(fn)` to ensure `cancel()` cleanup happens even if the read loop throws
-
-By default, `waitForStart()` treats `pageLoaded === true`, `coverOpen !== true`, and `warmup !== true` as ready and starts immediately when ready. For workflows that require both paper in the ADF and a front-panel button press, pass a custom `shouldStart` predicate:
-
-```ts
-const scanner = openScanner(deviceName, {
-  shouldStart(_device, status, ready) {
-    return ready && status.scanButton === true;
-  },
-});
-```
+Polling loops, timeout handling, and start conditions should live in the caller, for example in `scan-mgr`, using repeated `getStatus()` calls plus service-level state transitions.
 
 `getStatus()` reads portable sensor/button options when the backend exposes them, including standard names such as `page-loaded`, `cover-open`, `warmup`, and front-panel button flags. For backend-specific status signals, use `getOptionDescriptors()` plus `getOptionValue(nameOrIndex)`.
 
