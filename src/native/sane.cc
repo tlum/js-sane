@@ -2,7 +2,6 @@
 #include <sane/sane.h>
 #include <sane/saneopts.h>
 
-#include <memory>
 #include <string>
 #include <vector>
 
@@ -10,7 +9,7 @@ namespace {
 
 class SessionState {
  public:
-  SessionState() : initialized_(false), version_code_(0) {}
+  SessionState() : initialized_(false), version_code_(0), open_handles_(0) {}
 
   SANE_Status Init() {
     if (initialized_) {
@@ -25,22 +24,34 @@ class SessionState {
     return status;
   }
 
-  void Exit() {
+  bool Exit() {
+    if (open_handles_ > 0) {
+      return false;
+    }
+
     if (initialized_) {
       sane_exit();
       initialized_ = false;
       version_code_ = 0;
     }
-  }
 
-  ~SessionState() { Exit(); }
+    return true;
+  }
 
   bool initialized() const { return initialized_; }
   SANE_Int version_code() const { return version_code_; }
+  void RegisterHandle() { ++open_handles_; }
+  void UnregisterHandle() {
+    if (open_handles_ > 0) {
+      --open_handles_;
+    }
+  }
+  int open_handles() const { return open_handles_; }
 
  private:
   bool initialized_;
   SANE_Int version_code_;
+  int open_handles_;
 };
 
 SessionState g_session;
@@ -398,8 +409,13 @@ Napi::Value InitSession(const Napi::CallbackInfo& info) {
 }
 
 Napi::Value ExitSession(const Napi::CallbackInfo& info) {
-  g_session.Exit();
-  return info.Env().Undefined();
+  const Napi::Env env = info.Env();
+  if (!g_session.Exit()) {
+    Napi::Error::New(env, "Cannot call exit() while SANE device handles are still open")
+        .ThrowAsJavaScriptException();
+    return env.Null();
+  }
+  return env.Undefined();
 }
 
 Napi::Value GetVersion(const Napi::CallbackInfo& info) {
@@ -481,6 +497,9 @@ class DeviceHandle : public Napi::ObjectWrap<DeviceHandle> {
     }
 
     device_ = info[0].As<Napi::External<void>>().Data();
+    if (device_ != nullptr) {
+      g_session.RegisterHandle();
+    }
     if (info.Length() > 1 && info[1].IsString()) {
       name_ = info[1].As<Napi::String>().Utf8Value();
     }
@@ -497,6 +516,7 @@ class DeviceHandle : public Napi::ObjectWrap<DeviceHandle> {
     if (device_ != nullptr) {
       sane_close(device_);
       device_ = nullptr;
+      g_session.UnregisterHandle();
     }
   }
 
@@ -878,14 +898,14 @@ Napi::Value OpenDevice(const Napi::CallbackInfo& info) {
   }
 
   const std::string name = info[0].As<Napi::String>().Utf8Value();
-  auto handle = std::make_unique<SANE_Handle>(nullptr);
-  const SANE_Status status = sane_open(name.c_str(), handle.get());
+  SANE_Handle handle = nullptr;
+  const SANE_Status status = sane_open(name.c_str(), &handle);
   if (status != SANE_STATUS_GOOD) {
     ThrowSaneError(env, "sane_open failed", status);
     return env.Null();
   }
 
-  return DeviceHandle::NewInstance(env, handle.release(), name);
+  return DeviceHandle::NewInstance(env, handle, name);
 }
 
 }  // namespace

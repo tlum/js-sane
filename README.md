@@ -14,7 +14,7 @@ Node.js addon scaffold that binds to Linux `libsane`.
 npm install
 ```
 
-`npm install` only installs the JavaScript toolchain. The native addon build is intentionally explicit so the package can be set up before `libsane` development headers are present.
+`npm install` must leave the package usable. The native addon is expected to build during installation; if the host is missing the SANE headers/library or toolchain prerequisites, installation should fail immediately.
 
 ## Build
 
@@ -23,6 +23,24 @@ npm run build
 ```
 
 The native addon links with `-lsane`, so the system linker must be able to find `libsane.so`, and `sane/sane.h` must be installed before `npm run build:addon` or `npm run build`.
+
+## Packaging
+
+For consumption from another project, prefer a real package artifact:
+
+```bash
+npm pack
+```
+
+That tarball includes the compiled JavaScript under `dist/`. The consumer should install the package artifact and let `js-sane` own its own native build/install contract.
+
+You can validate the published artifact shape locally with:
+
+```bash
+npm run test:pack
+```
+
+That command packs the library, installs the tarball into a clean temporary project, and verifies that `require("@tlum/js-sane")` succeeds there.
 
 ## Current API
 
@@ -57,6 +75,8 @@ The addon exposes one-shot binding primitives:
 - `openScanner(name)` as a thin alias for `openDevice(name)` if that naming fits the caller better.
 
 Polling loops, timeout handling, and start conditions should live in the caller, for example in `scan-mgr`, using repeated `getStatus()` calls plus service-level state transitions.
+
+Call `close()` on every opened device handle before calling `exit()`. The addon now treats `exit()` as orderly library shutdown, not implicit process-teardown cleanup.
 
 `getStatus()` reads portable sensor/button options when the backend exposes them, including standard names such as `page-loaded`, `cover-open`, `warmup`, and front-panel button flags. For backend-specific status signals, use `getOptionDescriptors()` plus `getOptionValue(nameOrIndex)`.
 
