@@ -140,6 +140,74 @@ const char* FrameName(SANE_Frame frame) {
   }
 }
 
+double ConstraintWordToNumber(const SANE_Option_Descriptor* descriptor, SANE_Word value) {
+  if (descriptor->type == SANE_TYPE_FIXED) {
+    return SANE_UNFIX(value);
+  }
+
+  return value;
+}
+
+std::string JsTypeName(Napi::Value value) {
+  if (value.IsUndefined()) {
+    return "undefined";
+  }
+  if (value.IsNull()) {
+    return "null";
+  }
+  if (value.IsBoolean()) {
+    return std::string("boolean ") + (value.As<Napi::Boolean>().Value() ? "true" : "false");
+  }
+  if (value.IsNumber()) {
+    return std::string("number ") + std::to_string(value.As<Napi::Number>().DoubleValue());
+  }
+  if (value.IsString()) {
+    return std::string("string \"") + value.As<Napi::String>().Utf8Value() + "\"";
+  }
+  if (value.IsArray()) {
+    return "array";
+  }
+  if (value.IsObject()) {
+    return "object";
+  }
+  return "unknown";
+}
+
+void ThrowOptionTypeError(const Napi::Env& env, const SANE_Option_Descriptor* descriptor, Napi::Value input,
+                          const char* expected) {
+  std::string message = "Option \"";
+  message += SafeString(descriptor->name);
+  message += "\" is SANE_TYPE_";
+  switch (descriptor->type) {
+    case SANE_TYPE_BOOL:
+      message += "BOOL";
+      break;
+    case SANE_TYPE_INT:
+      message += "INT";
+      break;
+    case SANE_TYPE_FIXED:
+      message += "FIXED";
+      break;
+    case SANE_TYPE_STRING:
+      message += "STRING";
+      break;
+    case SANE_TYPE_BUTTON:
+      message += "BUTTON";
+      break;
+    case SANE_TYPE_GROUP:
+      message += "GROUP";
+      break;
+    default:
+      message += "UNKNOWN";
+      break;
+  }
+  message += "; expected ";
+  message += expected;
+  message += ", received ";
+  message += JsTypeName(input);
+  Napi::TypeError::New(env, message).ThrowAsJavaScriptException();
+}
+
 Napi::Value BuildConstraintValue(const Napi::Env& env, const SANE_Option_Descriptor* descriptor) {
   switch (descriptor->constraint_type) {
     case SANE_CONSTRAINT_NONE:
@@ -147,9 +215,9 @@ Napi::Value BuildConstraintValue(const Napi::Env& env, const SANE_Option_Descrip
     case SANE_CONSTRAINT_RANGE: {
       Napi::Object range = Napi::Object::New(env);
       range.Set("type", "range");
-      range.Set("min", descriptor->constraint.range->min);
-      range.Set("max", descriptor->constraint.range->max);
-      range.Set("quant", descriptor->constraint.range->quant);
+      range.Set("min", ConstraintWordToNumber(descriptor, descriptor->constraint.range->min));
+      range.Set("max", ConstraintWordToNumber(descriptor, descriptor->constraint.range->max));
+      range.Set("quant", ConstraintWordToNumber(descriptor, descriptor->constraint.range->quant));
       return range;
     }
     case SANE_CONSTRAINT_WORD_LIST: {
@@ -159,7 +227,7 @@ Napi::Value BuildConstraintValue(const Napi::Env& env, const SANE_Option_Descrip
       Napi::Array values = Napi::Array::New(env, length);
       result.Set("type", "wordList");
       for (int i = 0; i < length; ++i) {
-        values.Set(i, Napi::Number::New(env, words[i + 1]));
+        values.Set(i, Napi::Number::New(env, ConstraintWordToNumber(descriptor, words[i + 1])));
       }
       result.Set("values", values);
       return result;
@@ -329,7 +397,7 @@ bool WriteOptionValue(const Napi::Env& env, Napi::Value input, const SANE_Option
                       std::vector<SANE_Byte>* buffer_out) {
   if (descriptor->type == SANE_TYPE_BOOL) {
     if (!input.IsBoolean()) {
-      Napi::TypeError::New(env, "Boolean option requires a boolean value").ThrowAsJavaScriptException();
+      ThrowOptionTypeError(env, descriptor, input, "a boolean");
       return false;
     }
     buffer_out->resize(sizeof(SANE_Bool));
@@ -342,7 +410,7 @@ bool WriteOptionValue(const Napi::Env& env, Napi::Value input, const SANE_Option
     const auto element_size = sizeof(SANE_Word);
     if (descriptor->size == static_cast<SANE_Int>(element_size)) {
       if (!input.IsNumber()) {
-        Napi::TypeError::New(env, "Numeric option requires a number").ThrowAsJavaScriptException();
+        ThrowOptionTypeError(env, descriptor, input, "a number");
         return false;
       }
       buffer_out->resize(element_size);
@@ -353,7 +421,7 @@ bool WriteOptionValue(const Napi::Env& env, Napi::Value input, const SANE_Option
     }
 
     if (!input.IsArray()) {
-      Napi::TypeError::New(env, "Word-list option requires an array of numbers").ThrowAsJavaScriptException();
+      ThrowOptionTypeError(env, descriptor, input, "an array of numbers");
       return false;
     }
 
@@ -368,7 +436,7 @@ bool WriteOptionValue(const Napi::Env& env, Napi::Value input, const SANE_Option
     for (uint32_t i = 0; i < values.Length(); ++i) {
       Napi::Value entry = values.Get(i);
       if (!entry.IsNumber()) {
-        Napi::TypeError::New(env, "Word-list option requires only numbers").ThrowAsJavaScriptException();
+        ThrowOptionTypeError(env, descriptor, entry, "a number");
         return false;
       }
       const double number = entry.As<Napi::Number>().DoubleValue();
@@ -379,7 +447,7 @@ bool WriteOptionValue(const Napi::Env& env, Napi::Value input, const SANE_Option
 
   if (descriptor->type == SANE_TYPE_STRING) {
     if (!input.IsString()) {
-      Napi::TypeError::New(env, "String option requires a string value").ThrowAsJavaScriptException();
+      ThrowOptionTypeError(env, descriptor, input, "a string");
       return false;
     }
     const std::string value = input.As<Napi::String>().Utf8Value();
@@ -392,8 +460,7 @@ bool WriteOptionValue(const Napi::Env& env, Napi::Value input, const SANE_Option
     return true;
   }
 
-  Napi::TypeError::New(env, "Option type is not writable with setOptionValue")
-      .ThrowAsJavaScriptException();
+  ThrowOptionTypeError(env, descriptor, input, "a supported writable value");
   return false;
 }
 
